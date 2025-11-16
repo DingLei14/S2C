@@ -3,6 +3,8 @@
 This repository contains the official implementation of **S2C (Semantic-to-Change)**,  
 an unsupervised change detection framework designed for **very high resolution (VHR) remote sensing images**.
 
+![S2C workflow](S2C_flowchart.jpg)
+
 Our paper has been **accepted by AAAI 2026**.
 
 > **Paper title**:  
@@ -49,6 +51,7 @@ If you find this work useful in your research, please consider citing:
 ## Code Availability
 
 **Code: coming soon.**
+
 
 
 
