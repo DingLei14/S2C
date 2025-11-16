@@ -16,7 +16,7 @@ S2C is a contrastive learning based framework that:
 - **Learns noise-resistant differences** instead of only temporal similarity;
 - Uses a **multi-temporal triplet learning strategy** to explicitly model temporal changes;
 - Introduces **random spatial and spectral perturbations** to enhance robustness to temporal noise;
-- Employs **grid sparsity regularization** to suppress insignificant changes;
+- Introduces **grid sparsity regularization** to suppress insignificant changes;
 - Uses an **IoU-matching refinement** module to further clean up change maps.
 
 ## Accuracy and Benchmark Results
@@ -38,13 +38,17 @@ More detailed results and analyses can be found in the paper and its arXiv versi
 If you find this work useful in your research, please consider citing:
 
 ```text
-Lei Ding, Xibing Zuo, Haitao Guo, Jun Lu, Zhihui Gong, Xuanguang Liu, and Jicang Lu.
-"S2C: A Noise-Resistant Difference Learning Framework for Unsupervised Change Detection in VHR Remote Sensing Images."
-AAAI Conference on Artificial Intelligence (AAAI-26), 2026.
+@article{ding2025s2c,
+  title={S2C: Learning Noise-Resistant Differences for Unsupervised Change Detection in Multimodal Remote Sensing Images},
+  author={Ding, Lei and Zuo, Xibing and Hong, Danfeng and Guo, Haitao and Lu, Jun and Gong, Zhihui and Bruzzone, Lorenzo},
+  journal={arXiv preprint arXiv:2502.12604},
+  year={2025}
+}
 ```
 
 ## Code Availability
 
 **Code: coming soon.**
+
 
 
