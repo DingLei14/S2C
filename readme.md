@@ -50,7 +50,8 @@ If you find this work useful in your research, please consider citing:
 
 ## Code Availability
 
-**All codes will be re-organized, standardized, and then released (Coming soon).**
+**All codes will be re-organized, standardized, and then released (COMING SOON).**
+
 
 
 
