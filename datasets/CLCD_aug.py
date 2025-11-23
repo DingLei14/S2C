@@ -6,8 +6,15 @@ from skimage import io, exposure
 from torch.utils import data
 from skimage.transform import rescale
 from torchvision.transforms import functional as F
+import warnings
 
 import albumentations as A 
+
+warnings.filterwarnings(
+    "ignore",
+    message="ShiftScaleRotate is a special case of Affine transform",
+    module="albumentations",
+)
 
 num_classes = 1
 root = 'data/CLCD'
@@ -171,13 +178,7 @@ def strong_aug(img, img_ref):
         #A.ISONoise(p=0.5),
         ############### spatial transform ##############
         #A.OpticalDistortion(distort_limit=0.05, shift_limit=0.05, interpolation=1, border_mode=4, value=None, mask_value=None, p=0.5),
-        A.Affine(
-            scale=(1.0, 1.0),
-            translate_percent={"x": (-0.03125, 0.03125), "y": (-0.03125, 0.03125)},
-            rotate=0.0,
-            shear=None,
-            p=1.0,
-        ),
+        A.ShiftScaleRotate(shift_limit=0.03125, scale_limit=0.0, rotate_limit=0.0, p=1.),
         ], p=1.)
     aug_result = aug(image=img)
     return aug_result['image']
