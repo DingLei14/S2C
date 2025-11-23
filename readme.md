@@ -1,10 +1,21 @@
 # S2C Training Codebase
 
+**Paper:** *S2C: Learning Noise-Resistant Differences for Unsupervised Change Detection in Multimodal Remote Sensing Images*  
+PDF: [assets/2502.12604v1.pdf](assets/2502.12604v1.pdf)
+
+![S2C flowchart](assets/S2C_flowchart.jpg)
+
+## News
+
+- **2025-11-08:** Paper accepted to AAAI-2026.
+- **2025-11-20:** Full codebase published here.
+- **2025-11-23:** Added support for the DINOv3 backbone.
+
 This repository packages the S2C experimental training scripts and provides a unified, configuration‑driven entry point for different datasets. The goal is to keep the workflow easy to reproduce and release on GitHub.
 
 ## Paper and Citation
 
-If you use this codebase in your research, please cite the corresponding S2C paper: 
+If you use this codebase in your research, please cite:
 
 ```bibtex
 @article{ding2025s2c,
@@ -93,6 +104,5 @@ All output paths under `paths` are resolved relative to the repo root.
 
 - Core model definitions, loss functions, and the training pipeline remain identical to the original implementation.
 - Logging uses `tensorboardX` by default; visualize with `tensorboard --logdir runs`.
-
 
 
