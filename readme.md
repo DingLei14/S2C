@@ -11,8 +11,6 @@ PDF: [assets/2502.12604v1.pdf](assets/2502.12604v1.pdf)
 - **2025-11-20:** Full codebase published here.
 - **2025-11-23:** Added support for the DINOv3 backbone.
 
-This repository packages the S2C experimental training scripts and provides a unified, configuration‑driven entry point for different datasets. The goal is to keep the workflow easy to reproduce and release on GitHub.
-
 ## Paper and Citation
 
 If you use this codebase in your research, please cite:
@@ -41,8 +39,6 @@ If you use this codebase in your research, please cite:
 ```bash
 pip install tensorboardX albumentations scikit-image scipy pyyaml
 ```
-
-For the optional DINOv3 PCA tools under `models/dinov3`, see `models/dinov3/README_RS_PCA.md` for details on extra dependencies and checkpoints.
 
 ## Quick Start
 
