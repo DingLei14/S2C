@@ -281,6 +281,8 @@ class DinoV3_CD_LoRA(nn.Module):
 
 
 # Backward-compatible alias
-Dino_CD_LoRA = DinoV3_CD_LoRA
+Dinov3_CD_LoRA = DinoV3_CD_LoRA
+Dino_CD_LoRA = Dinov3_CD_LoRA
+Dinov3_CD = Dinov3_CD_LoRA
 
 
