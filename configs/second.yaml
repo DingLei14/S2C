@@ -1,0 +1,53 @@
+experiment:
+  name: Dinov3_LVDvitl_LoRArank4
+  dataset: SECOND
+
+model:
+  module: models.Dinov3_LoRA
+  class_name: Dino_CD_LoRA
+  args: {}
+
+dataset:
+  module: datasets.SECOND_aug
+  class_name: RS
+  root: data/SECOND
+  train:
+    split: train
+    kwargs:
+      random_crop: false
+      crop_nums: 4
+      crop_size: 512
+  val:
+    split: val
+    kwargs:
+      sliding_crop: false
+  test:
+    split: test
+    kwargs:
+      sliding_crop: false
+
+training:
+  train_batch_size: 12
+  val_batch_size: 12
+  num_workers: 4
+  lr: 0.01
+  epochs: 20
+  gpu: true
+  dev_id: 0
+  multi_gpu: null
+  use_balanced_dp: false
+  print_freq: 10
+  predict_step: 5
+  infoNCE_weight: 0.2
+  sparse_weight: 1.0
+  sparse_thred: 0.4
+  loss_terms:
+    - infoNCE
+  tta: true
+  load_path: null
+
+paths:
+  checkpoints: checkpoints/SECOND
+  results: results/SECOND
+  logs: runs/SECOND
+

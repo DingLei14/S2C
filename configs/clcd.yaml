@@ -1,0 +1,55 @@
+experiment:
+  name: Dinov3_LVDvitl_LoRArank4
+  dataset: CLCD
+
+model:
+  module: models.Dinov3_LoRA
+  class_name: Dino_CD_LoRA
+  args: {}
+
+dataset:
+  module: datasets.CLCD_aug
+  class_name: RS
+  root: data/CLCD
+  train:
+    split: train
+    kwargs:
+      random_crop: false
+      crop_nums: 3
+      crop_size: 512
+  val:
+    split: val
+    kwargs:
+      sliding_crop: false
+  test:
+    split: test
+    kwargs:
+      sliding_crop: false
+
+training:
+  train_batch_size: 12
+  val_batch_size: 12
+  num_workers: 4
+  lr: 0.01
+  epochs: 20
+  gpu: true
+  dev_id: 0
+  multi_gpu: null
+  use_balanced_dp: true
+  print_freq: 10
+  predict_step: 5
+  infoNCE_weight: 0.2
+  sparse_weight: 2.0
+  sparse_thred: 0.2
+  loss_terms:
+    - triplet
+    - infoNCE
+    - sparse
+  tta: true
+  load_path: null
+
+paths:
+  checkpoints: checkpoints/CLCD
+  results: results/CLCD
+  logs: runs/CLCD
+
