@@ -74,11 +74,14 @@ def build_efficient_sam_vits():
     ).eval()
 
 class _LoRA_qkv(nn.Module):
-    """In Sam it is implemented as
-    self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
-    B, N, C = x.shape
-    qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
-    q, k, v = qkv.unbind(0)
+    """LoRA wrapper for qkv linear layer.
+    
+    SAM2 uses MultiScaleAttention where:
+    self.qkv = nn.Linear(dim, dim_out * 3)
+    qkv = self.qkv(x).reshape(B, H * W, 3, self.num_heads, -1)
+    q, k, v = torch.unbind(qkv, 2)
+    
+    Note: dim_out may differ from dim in SAM2's Hiera backbone.
     """
 
     def __init__(
@@ -95,15 +98,16 @@ class _LoRA_qkv(nn.Module):
         self.linear_b_q = linear_b_q
         self.linear_a_v = linear_a_v
         self.linear_b_v = linear_b_v
-        self.dim = qkv.in_features
-        self.w_identity = torch.eye(qkv.in_features)
+        # SAM2: qkv output is dim_out * 3, so each q/k/v has dimension out_features // 3
+        self.dim_out = qkv.out_features // 3
 
     def forward(self, x):
-        qkv = self.qkv(x)  # B,N,N,3*org_C
+        qkv = self.qkv(x)  # B, H, W, 3*dim_out
         new_q = self.linear_b_q(self.linear_a_q(x))
         new_v = self.linear_b_v(self.linear_a_v(x))
-        qkv[:, :, :self.dim] += new_q
-        qkv[:, :, -self.dim:] += new_v
+        # q is in the first dim_out, v is in the last dim_out
+        qkv[..., :self.dim_out] += new_q
+        qkv[..., -self.dim_out:] += new_v
         return qkv
 
 class LoRA_Sam(nn.Module):
@@ -123,22 +127,25 @@ class LoRA_Sam(nn.Module):
         torch.Size([1, 1000])
     """
 
-    def __init__(self, r: int, sam_model: Sam=None, lora_layer=[8,9,10,11]): #lora_layer=None
+    def __init__(self, r: int, sam_model: nn.Module=None, lora_layer=[8,9,10,11]): #lora_layer=None
         super(LoRA_Sam, self).__init__()
 
         if not sam_model:
-            checkpoint = "/root/autodl-fs/S2C/models/sam2/checkpoints/sam2.1_hiera_tiny.pt"
-            model_cfg = "/root/autodl-fs/S2C/models/sam2/configs/sam2.1/sam2.1_hiera_t.yaml"
+            model_cfg = "configs/sam2.1/sam2.1_hiera_t.yaml"
+            checkpoint = os.path.join(working_path, "models", "sam2", "checkpoints", "sam2.1_hiera_tiny.pt")
             sam_model = build_sam2(model_cfg, checkpoint)
             #sam_model = build_efficient_sam_vits()
         
         assert r > 0
-        # base_vit_dim = sam_model.image_encoder.patch_embed.proj.out_channels
-        # dim = base_vit_dim
+        
+        # SAM2 image_encoder structure: image_encoder.trunk.blocks (Hiera backbone)
+        trunk = sam_model.image_encoder.trunk
+        
         if lora_layer:
             self.lora_layer = lora_layer
         else:
-            self.lora_layer = list(range(len(sam_model.image_encoder.blocks)))
+            self.lora_layer = list(range(len(trunk.blocks)))
+        
         # create for storage, then we can init them or load weights
         self.w_As = []  # These are linear layers
         self.w_Bs = []
@@ -147,17 +154,18 @@ class LoRA_Sam(nn.Module):
         for param in sam_model.image_encoder.parameters():
             param.requires_grad = False
 
-        # Here, we do the surgery
-        for t_layer_i, blk in enumerate(sam_model.image_encoder.blocks):
+        # Here, we do the surgery on trunk.blocks
+        for t_layer_i, blk in enumerate(trunk.blocks):
             # If we only want few lora layer instead of all
             if t_layer_i not in self.lora_layer:
                 continue
             w_qkv_linear = blk.attn.qkv
             self.dim = w_qkv_linear.in_features
+            dim_out = w_qkv_linear.out_features // 3
             w_a_linear_q = nn.Linear(self.dim, r, bias=False)
-            w_b_linear_q = nn.Linear(r, self.dim, bias=False)
+            w_b_linear_q = nn.Linear(r, dim_out, bias=False)
             w_a_linear_v = nn.Linear(self.dim, r, bias=False)
-            w_b_linear_v = nn.Linear(r, self.dim, bias=False)
+            w_b_linear_v = nn.Linear(r, dim_out, bias=False)
             self.w_As.append(w_a_linear_q)
             self.w_Bs.append(w_b_linear_q)
             self.w_As.append(w_a_linear_v)
@@ -173,7 +181,9 @@ class LoRA_Sam(nn.Module):
         #print(self.sam)
     
     def get_image_embeddings(self, x: Tensor) -> Tensor:
-        return self.sam.image_encoder(x)
+        # SAM2 image_encoder returns a dict: {"vision_features": src, "vision_pos_enc": pos, "backbone_fpn": features}
+        output = self.sam.image_encoder(x)
+        return output["vision_features"]
 
     def load_fc_parameters(self, filename: str) -> None:
         r"""Only safetensors is supported now.

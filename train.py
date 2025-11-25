@@ -13,7 +13,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         '--config',
         type=str,
-        default='configs/clcd.yaml',
+        default='configs/second.yaml',
         help='Path to the config file (relative to repo root by default)',
     )
     parser.add_argument(

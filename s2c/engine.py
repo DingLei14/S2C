@@ -175,6 +175,12 @@ def _train_loop(loaders, net, cfg, writer, device, dataset_module):
 
     while curr_epoch < epochs:
         _clear_cuda_cache(device)
+        
+        # Shuffle epoch sampling for training dataset if supported
+        train_dataset = loaders['train'].dataset
+        if hasattr(train_dataset, 'shuffle_epoch'):
+            train_dataset.shuffle_epoch()
+        
         net.train()
         start = time.time()
         loss_triplet_meter = AverageMeter()

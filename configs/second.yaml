@@ -17,6 +17,7 @@ dataset:
       random_crop: false
       crop_nums: 4
       crop_size: 512
+      epoch_sample_size: 800  # number of image pairs to sample per epoch (set to null or -1 to use all data)
   val:
     split: val
     kwargs:
@@ -36,7 +37,7 @@ training:
   dev_id: 0
   multi_gpu: null
   use_balanced_dp: false
-  print_freq: 50
+  print_freq: 20
   predict_step: 5
   infoNCE_weight: 0.2
   sparse_weight: 1.0

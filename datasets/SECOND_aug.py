@@ -190,27 +190,69 @@ def strong_aug(img, img_ref):
     return aug_result['image']
 
 class RS(data.Dataset):
-    def __init__(self, mode, random_crop=False, crop_nums=6, sliding_crop=False, crop_size=512, random_flip=False):
+    def __init__(self, mode, random_crop=False, crop_nums=6, sliding_crop=False, crop_size=512, random_flip=False,
+                 epoch_sample_size=800):
+        """
+        Args:
+            mode: 'train', 'val', or 'test'
+            random_crop: whether to apply random crop
+            crop_nums: number of crops per image when random_crop is True
+            sliding_crop: whether to apply sliding window crop
+            crop_size: size of the crop window
+            random_flip: whether to apply random flip
+            epoch_sample_size: number of image pairs to sample per epoch for training (default: 800)
+                              Set to None or -1 to use all data
+        """
         self.mode = mode
         self.random_flip = random_flip
         self.random_crop = random_crop
         self.crop_nums = crop_nums
         self.crop_size = crop_size
+        self.epoch_sample_size = epoch_sample_size
+        
         data_A, data_B, labels = read_RSimages(mode, read_list=False)
         if sliding_crop:
             data_A, data_B, labels = sliding_crop_CD(data_A, data_B, labels, [self.crop_size, self.crop_size])                
         self.data_A, self.data_B, self.labels = data_A, data_B, labels
-        if self.random_crop:
-            self.len = crop_nums*len(self.data_A)
+        self.total_samples = len(self.data_A)
+        
+        # For training mode, use epoch sampling; for val/test, use all data
+        if self.mode == 'train' and self.epoch_sample_size is not None and self.epoch_sample_size > 0:
+            self.use_epoch_sampling = True
+            self.epoch_sample_size = min(self.epoch_sample_size, self.total_samples)
+            self.sample_indices = []
+            self.shuffle_epoch()  # Initialize indices for first epoch
         else:
-            self.len = len(self.data_A)
+            self.use_epoch_sampling = False
+            self.sample_indices = list(range(self.total_samples))
+        
+        self._update_len()
+    
+    def shuffle_epoch(self):
+        """Shuffle and sample indices for a new epoch. Call this at the start of each epoch."""
+        if self.use_epoch_sampling:
+            all_indices = list(range(self.total_samples))
+            random.shuffle(all_indices)
+            self.sample_indices = all_indices[:self.epoch_sample_size]
+            print(f'Epoch sampling: {self.epoch_sample_size}/{self.total_samples} pairs selected.')
+    
+    def _update_len(self):
+        """Update dataset length based on current sample indices."""
+        base_len = len(self.sample_indices)
+        if self.random_crop:
+            self.len = self.crop_nums * base_len
+        else:
+            self.len = base_len
 
     def __getitem__(self, idx):
         if self.random_crop:
-            idx = idx//self.crop_nums
-        data_A = self.data_A[idx]
-        data_B = self.data_B[idx]
-        label = self.labels[idx]
+            sample_idx = self.sample_indices[idx // self.crop_nums]
+        else:
+            sample_idx = self.sample_indices[idx]
+        
+        data_A = self.data_A[sample_idx]
+        data_B = self.data_B[sample_idx]
+        label = self.labels[sample_idx]
                 
         if self.random_crop:
             data_A, data_B, label = rand_crop_CD(data_A, data_B, label, [self.crop_size, self.crop_size])
