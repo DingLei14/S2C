@@ -1,5 +1,7 @@
 
 import math
+import os
+import sys
 import torch
 import numpy as np
 from torch import nn
@@ -11,10 +13,12 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 from utils.misc import initialize_weights
 
-from models.sam2.sam2.build_sam import build_sam2
+working_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+_sam2_root = os.path.join(working_path, 'models', 'sam2')
+if _sam2_root not in sys.path:
+    sys.path.insert(0, _sam2_root)
 
-import os
-working_path = os.path.abspath('.')
+from models.sam2.sam2.build_sam import build_sam2
 
 
 def conv1x1(in_planes, out_planes, stride=1):
