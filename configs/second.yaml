@@ -4,13 +4,13 @@ experiment:
 
 model:
   module: models.Dinov3_LoRA
-  class_name: Dino_CD_LoRA
+  class_name: Dinov3_CD
   args: {}
 
 dataset:
   module: datasets.SECOND_aug
   class_name: RS
-  root: data/SECOND
+  root: /root/autodl-tmp/Data/SECOND/
   train:
     split: train
     kwargs:
@@ -36,7 +36,7 @@ training:
   dev_id: 0
   multi_gpu: null
   use_balanced_dp: false
-  print_freq: 10
+  print_freq: 50
   predict_step: 5
   infoNCE_weight: 0.2
   sparse_weight: 1.0

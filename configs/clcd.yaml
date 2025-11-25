@@ -4,13 +4,13 @@ experiment:
 
 model:
   module: models.Dinov3_LoRA
-  class_name: Dino_CD_LoRA
+  class_name: Dinov3_CD
   args: {}
 
 dataset:
   module: datasets.CLCD_aug
   class_name: RS
-  root: data/CLCD
+  root: /autodl-fs/data/Data/CLCD/
   train:
     split: train
     kwargs:
