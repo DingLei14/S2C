@@ -156,7 +156,7 @@ def read_RSimages(mode, read_list=False):
             data_B.append(img_B)
             labels.append(Color2Index(label))
         #if idx>10: break    
-        if mode=='train' and len(data_A)>99: break
+        #if mode=='train' and len(data_A)>99: break
         if not idx%10: print('%d/%d images loaded.'%(idx, len(data_list)))
     print(data_A[0].shape)
     print(str(len(data_A)+1) + ' ' + mode + ' images loaded.')   
@@ -180,7 +180,7 @@ def strong_aug(img, img_ref):
         #A.RandomBrightnessContrast(p=0.5),
         ################# blur and noise ###############
         #A.Blur(p=0.5),
-        A.Downscale(scale_min=0.1, scale_max=0.3, p=0.5), #interpolation={"downscale":cv2.INTER_NEAREST, "upscale":cv2.INTER_LINEAR}, 
+        A.Downscale(scale_range=[0.25, 0.5], p=0.5), #interpolation={"downscale":cv2.INTER_NEAREST, "upscale":cv2.INTER_LINEAR},
         #A.ISONoise(p=0.5),
         ############### spatial transform ##############
         #A.OpticalDistortion(distort_limit=0.05, shift_limit=0.05, interpolation=1, border_mode=4, value=None, mask_value=None, p=0.5),
