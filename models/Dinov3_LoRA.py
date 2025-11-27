@@ -180,63 +180,101 @@ def _find_local_weights(preferred_prefixes: List[str], fallback_contains: Option
 
 
 class DinoV3_CD_LoRA(nn.Module):
-    def __init__(self, num_embed: int = 16, model_name: str = 'vitl16', lora_r: int = 4, lora_layers: Optional[List[int]] = None):
+    def __init__(self, num_embed: int = 16, model_name: str = 'vitl16', lora_r: int = 4, lora_layers: Optional[List[int]] = None, heterogeneous: bool = False):
         super(DinoV3_CD_LoRA, self).__init__()
 
-        # Prefer local pretrained weights; default vitl16, fallback to vitb16
-        if model_name == 'vitl16':
-            preferred = ['dinov3_vitl16_pretrain_lvd1689m', 'dinov3_vitl16_pretrain_sat493m', 'dinov3_vitl16']
-            weights_path = _find_local_weights(preferred, fallback_contains=['vitl16'])
-            search_dir = os.path.join(working_path, 'models', 'dinov3', 'pretrained_weights')
-            print(f"[dinov3] backbone=vitl16, weights_dir={search_dir}")
-            using_pretrained = bool(weights_path)
-            if using_pretrained:
-                try:
-                    size_mb = os.path.getsize(weights_path) / (1024*1024)
-                    print(f"[dinov3] weights_path={weights_path} (size={size_mb:.2f} MB)")
-                except Exception:
-                    print(f"[dinov3] weights_path={weights_path}")
+        self.heterogeneous = heterogeneous
+        
+        # Helper function to create a ViT backbone
+        def _create_vit(model_name: str):
+            if model_name == 'vitl16':
+                preferred = ['dinov3_vitl16_pretrain_lvd1689m', 'dinov3_vitl16_pretrain_sat493m', 'dinov3_vitl16']
+                weights_path = _find_local_weights(preferred, fallback_contains=['vitl16'])
+                search_dir = os.path.join(working_path, 'models', 'dinov3', 'pretrained_weights')
+                print(f"[dinov3] backbone=vitl16, weights_dir={search_dir}")
+                using_pretrained = bool(weights_path)
+                if using_pretrained:
+                    try:
+                        size_mb = os.path.getsize(weights_path) / (1024*1024)
+                        print(f"[dinov3] weights_path={weights_path} (size={size_mb:.2f} MB)")
+                    except Exception:
+                        print(f"[dinov3] weights_path={weights_path}")
+                else:
+                    print("[dinov3] weights_path=None (random init)")
+                return dinov3_vitl16(pretrained=using_pretrained, weights=str(weights_path) if weights_path else None)
             else:
-                print("[dinov3] weights_path=None (random init)")
-            vit = dinov3_vitl16(pretrained=using_pretrained, weights=str(weights_path) if weights_path else None)
-        else:
-            # Default to vitb16 to align with the channel width (768) used in earlier versions
-            preferred = ['dinov3_vitb16_pretrain', 'dinov3_vitb16']
-            weights_path = _find_local_weights(preferred, fallback_contains=['vitb16'])
-            search_dir = os.path.join(working_path, 'models', 'dinov3', 'pretrained_weights')
-            print(f"[dinov3] backbone=vitb16, weights_dir={search_dir}")
-            using_pretrained = bool(weights_path)
-            if using_pretrained:
-                try:
-                    size_mb = os.path.getsize(weights_path) / (1024*1024)
-                    print(f"[dinov3] weights_path={weights_path} (size={size_mb:.2f} MB)")
-                except Exception:
-                    print(f"[dinov3] weights_path={weights_path}")
-            else:
-                print("[dinov3] weights_path=None (random init)")
-            vit = dinov3_vitb16(pretrained=using_pretrained, weights=str(weights_path) if weights_path else None)
-
-        self.dino = LoRA_DinoV3(vit, r=lora_r, lora_layer=lora_layers)
-
-        # Dynamically adapt the channel count (vitl16=1024, vitb16=768)
+                # Default to vitb16 to align with the channel width (768) used in earlier versions
+                preferred = ['dinov3_vitb16_pretrain', 'dinov3_vitb16']
+                weights_path = _find_local_weights(preferred, fallback_contains=['vitb16'])
+                search_dir = os.path.join(working_path, 'models', 'dinov3', 'pretrained_weights')
+                print(f"[dinov3] backbone=vitb16, weights_dir={search_dir}")
+                using_pretrained = bool(weights_path)
+                if using_pretrained:
+                    try:
+                        size_mb = os.path.getsize(weights_path) / (1024*1024)
+                        print(f"[dinov3] weights_path={weights_path} (size={size_mb:.2f} MB)")
+                    except Exception:
+                        print(f"[dinov3] weights_path={weights_path}")
+                else:
+                    print("[dinov3] weights_path=None (random init)")
+                return dinov3_vitb16(pretrained=using_pretrained, weights=str(weights_path) if weights_path else None)
+        
+        # Create backbone(s)
+        vit = _create_vit(model_name)
         in_channels = getattr(vit, 'embed_dim', 1024 if model_name == 'vitl16' else 768)
-        self.Adapter = nn.Sequential(
-            nn.Conv2d(in_channels, 64, kernel_size=1, stride=1, padding=0, bias=False),
-            nn.BatchNorm2d(64),
-            nn.ReLU(),
-            nn.Conv2d(64, num_embed, kernel_size=1),
-        )
+        self._patch_size = getattr(vit, 'patch_size', 16)
+        
+        if self.heterogeneous:
+            # Heterogeneous mode: two separate encoders for different input modalities
+            print("[dinov3] Heterogeneous mode enabled: using two separate encoders")
+            vit2 = _create_vit(model_name)
+            
+            # Different LoRA configurations for each encoder (following Dino_LoRA_Het.py pattern)
+            # Encoder 1: smaller LoRA rank, fewer layers (for one modality)
+            lora_layers_1 = lora_layers if lora_layers is not None else [8, 9, 10, 11]
+            self.dino1 = LoRA_DinoV3(vit, r=lora_r, lora_layer=lora_layers_1)
+            
+            # Encoder 2: larger LoRA rank, all layers (for another modality)
+            depth = len(vit2.blocks)
+            lora_layers_2 = list(range(depth))
+            self.dino2 = LoRA_DinoV3(vit2, r=lora_r * 8, lora_layer=lora_layers_2)
+            
+            # Two separate adapters
+            self.Adapter1 = nn.Sequential(
+                nn.Conv2d(in_channels, 64, kernel_size=1, stride=1, padding=0, bias=False),
+                nn.BatchNorm2d(64),
+                nn.ReLU(),
+                nn.Conv2d(64, num_embed, kernel_size=1),
+            )
+            self.Adapter2 = nn.Sequential(
+                nn.Conv2d(in_channels, 64, kernel_size=1, stride=1, padding=0, bias=False),
+                nn.BatchNorm2d(64),
+                nn.ReLU(),
+                nn.Conv2d(64, num_embed, kernel_size=1),
+            )
+            initialize_weights(self.Adapter1, self.Adapter2)
+        else:
+            # Standard mode: single encoder for both inputs
+            self.dino = LoRA_DinoV3(vit, r=lora_r, lora_layer=lora_layers)
+            self.Adapter = nn.Sequential(
+                nn.Conv2d(in_channels, 64, kernel_size=1, stride=1, padding=0, bias=False),
+                nn.BatchNorm2d(64),
+                nn.ReLU(),
+                nn.Conv2d(64, num_embed, kernel_size=1),
+            )
+            initialize_weights(self.Adapter)
 
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
-
-        initialize_weights(self.Adapter)
-
-        self._patch_size = getattr(vit, 'patch_size', 16)
 
         # expose vit attributes for external logging if needed
 
     @torch.no_grad()
-    def run_pretrain(self, image: Tensor) -> Tensor:
+    def run_pretrain(self, image: Tensor, encoder_id: int = 1) -> Tensor:
+        if self.heterogeneous:
+            if encoder_id == 1:
+                return self.dino1.get_image_embeddings(image)
+            else:
+                return self.dino2.get_image_embeddings(image)
         return self.dino.get_image_embeddings(image)
 
     def _make_layer(self, block, inplanes, planes, blocks, stride=1):
@@ -255,22 +293,50 @@ class DinoV3_CD_LoRA(nn.Module):
 
         return nn.Sequential(*layers)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # pad inputs to multiples of the patch size when necessary
+    def _pad_to_patch_size(self, x: torch.Tensor) -> torch.Tensor:
+        """Pad inputs to multiples of the patch size when necessary."""
         ps = self._patch_size
         if (x.shape[-2] % ps) or (x.shape[-1] % ps):
             new_h = ps * (x.shape[-2] // ps + (1 if x.shape[-2] % ps else 0))
             new_w = ps * (x.shape[-1] // ps + (1 if x.shape[-1] % ps else 0))
             x = F.interpolate(x, [new_h, new_w], mode='bilinear', align_corners=False)
+        return x
+
+    def forward1(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward through encoder 1 (for heterogeneous mode)."""
+        x = self._pad_to_patch_size(x)
+        feats = self.dino1.get_image_embeddings(x)
+        y = self.Adapter1(feats)
+        return y
+
+    def forward2(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward through encoder 2 (for heterogeneous mode)."""
+        x = self._pad_to_patch_size(x)
+        feats = self.dino2.get_image_embeddings(x)
+        y = self.Adapter2(feats)
+        return y
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Standard forward (single encoder mode only)."""
+        x = self._pad_to_patch_size(x)
         feats = self.run_pretrain(x)
         y = self.Adapter(feats)
         return y
 
     def bi_forward(self, x1: torch.Tensor, x2: torch.Tensor) -> torch.Tensor:
+        """Bi-temporal forward for change detection.
+        
+        In heterogeneous mode: x1 goes through encoder1, x2 goes through encoder2.
+        In standard mode: both x1 and x2 go through the same encoder.
+        """
         input_shape = x1.shape[-2:]
 
-        y1 = self.forward(x1)
-        y2 = self.forward(x2)
+        if self.heterogeneous:
+            y1 = self.forward1(x1)
+            y2 = self.forward2(x2)
+        else:
+            y1 = self.forward(x1)
+            y2 = self.forward(x2)
 
         y1_norm = y1 / (torch.norm(y1, dim=1, keepdim=True) + 1e-6)
         y2_norm = y2 / (torch.norm(y2, dim=1, keepdim=True) + 1e-6)

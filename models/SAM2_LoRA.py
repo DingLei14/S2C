@@ -1,16 +1,16 @@
-
-import math
 import os
 import sys
-import torch
+import math
+from typing import List, Optional
+
 import numpy as np
-from torch import nn
-from torch import Tensor
+import torch
+from torch import nn, Tensor
 from torch.nn import functional as F
 from torch.nn.parameter import Parameter
-from typing import Dict, List
 from safetensors import safe_open
 from safetensors.torch import save_file
+
 from utils.misc import initialize_weights
 
 working_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -25,13 +25,16 @@ def conv1x1(in_planes, out_planes, stride=1):
     """1x1 convolution"""
     return nn.Conv2d(in_planes, out_planes, kernel_size=1, stride=stride, bias=False)
 
+
 def conv3x3(in_planes, out_planes, stride=1, groups=1, dilation=1):
     """3x3 convolution with padding"""
     return nn.Conv2d(in_planes, out_planes, kernel_size=3, stride=stride,
                      padding=dilation, groups=groups, bias=False, dilation=dilation)
 
+
 class ResBlock(nn.Module):
     expansion = 1
+
     def __init__(self, inplanes, planes, stride=1, downsample=None):
         super(ResBlock, self).__init__()
         self.conv1 = conv3x3(inplanes, planes, stride)
@@ -41,7 +44,7 @@ class ResBlock(nn.Module):
         self.bn2 = nn.BatchNorm2d(planes)
         self.downsample = downsample
         self.stride = stride
-    
+
     def forward(self, x):
         identity = x
 
@@ -58,31 +61,9 @@ class ResBlock(nn.Module):
         out = self.relu(out)
         return out
 
-def build_efficient_sam_vitt():    
-    return build_efficient_sam(
-        encoder_patch_embed_dim=192,
-        encoder_num_heads=3,
-        checkpoint = working_path+'/EfficientSAM/weights/efficient_sam_vitt.pt',
-    ).eval()
-
-
-def build_efficient_sam_vits():
-    return build_efficient_sam(
-        encoder_patch_embed_dim=384,
-        encoder_num_heads=6,
-        checkpoint = working_path+'/EfficientSAM/weights/efficient_sam_vits.pt',
-    ).eval()
 
 class _LoRA_qkv(nn.Module):
-    """LoRA wrapper for qkv linear layer.
-    
-    SAM2 uses MultiScaleAttention where:
-    self.qkv = nn.Linear(dim, dim_out * 3)
-    qkv = self.qkv(x).reshape(B, H * W, 3, self.num_heads, -1)
-    q, k, v = torch.unbind(qkv, 2)
-    
-    Note: dim_out may differ from dim in SAM2's Hiera backbone.
-    """
+    """LoRA wrapper for SAM2 qkv linear layer."""
 
     def __init__(
         self,
@@ -98,65 +79,46 @@ class _LoRA_qkv(nn.Module):
         self.linear_b_q = linear_b_q
         self.linear_a_v = linear_a_v
         self.linear_b_v = linear_b_v
-        # SAM2: qkv output is dim_out * 3, so each q/k/v has dimension out_features // 3
         self.dim_out = qkv.out_features // 3
 
     def forward(self, x):
-        qkv = self.qkv(x)  # B, H, W, 3*dim_out
+        qkv = self.qkv(x)
         new_q = self.linear_b_q(self.linear_a_q(x))
         new_v = self.linear_b_v(self.linear_a_v(x))
-        # q is in the first dim_out, v is in the last dim_out
         qkv[..., :self.dim_out] += new_q
         qkv[..., -self.dim_out:] += new_v
         return qkv
 
-class LoRA_Sam(nn.Module):
-    """Applies low-rank adaptation to a Sam model's image encoder.
 
-    Args:
-        sam_model: a vision transformer model, see base_vit.py
-        r: rank of LoRA
-        num_classes: how many classes the model output, default to the vit model
-        lora_layer: which layer we apply LoRA.
+class LoRA_Sam2(nn.Module):
+    """LoRA wrapper for SAM2 image encoder."""
 
-    Examples::
-        >>> model = ViT('B_16_imagenet1k')
-        >>> lora_model = LoRA_ViT(model, r=4)
-        >>> preds = lora_model(img)
-        >>> print(preds.shape)
-        torch.Size([1, 1000])
-    """
-
-    def __init__(self, r: int, sam_model: nn.Module=None, lora_layer=[8,9,10,11]): #lora_layer=None
-        super(LoRA_Sam, self).__init__()
+    def __init__(self, r: int, sam_model: nn.Module = None, lora_layer: Optional[List[int]] = None):
+        super(LoRA_Sam2, self).__init__()
 
         if not sam_model:
             model_cfg = "configs/sam2.1/sam2.1_hiera_t.yaml"
             checkpoint = os.path.join(working_path, "models", "sam2", "checkpoints", "sam2.1_hiera_tiny.pt")
             sam_model = build_sam2(model_cfg, checkpoint)
-            #sam_model = build_efficient_sam_vits()
-        
+
         assert r > 0
-        
-        # SAM2 image_encoder structure: image_encoder.trunk.blocks (Hiera backbone)
+
         trunk = sam_model.image_encoder.trunk
-        
-        if lora_layer:
+
+        if lora_layer is not None:
             self.lora_layer = lora_layer
         else:
             self.lora_layer = list(range(len(trunk.blocks)))
-        
-        # create for storage, then we can init them or load weights
-        self.w_As = []  # These are linear layers
+
+        self.w_As = []
         self.w_Bs = []
 
-        # lets freeze first
+        # Freeze backbone
         for param in sam_model.image_encoder.parameters():
             param.requires_grad = False
 
-        # Here, we do the surgery on trunk.blocks
+        # LoRA surgery
         for t_layer_i, blk in enumerate(trunk.blocks):
-            # If we only want few lora layer instead of all
             if t_layer_i not in self.lora_layer:
                 continue
             w_qkv_linear = blk.attn.qkv
@@ -175,78 +137,14 @@ class LoRA_Sam(nn.Module):
                 w_a_linear_q,
                 w_b_linear_q,
                 w_a_linear_v,
-                w_b_linear_v,)
+                w_b_linear_v,
+            )
         self.reset_parameters()
         self.sam = sam_model
-        #print(self.sam)
-    
+
     def get_image_embeddings(self, x: Tensor) -> Tensor:
-        # SAM2 image_encoder returns a dict: {"vision_features": src, "vision_pos_enc": pos, "backbone_fpn": features}
         output = self.sam.image_encoder(x)
         return output["vision_features"]
-
-    def load_fc_parameters(self, filename: str) -> None:
-        r"""Only safetensors is supported now.
-        pip install safetensor if you do not have one installed yet.
-        """
-
-        assert filename.endswith(".safetensors")
-        _in = self.lora_vit.head.in_features
-        _out = self.lora_vit.head.out_features
-        with safe_open(filename, framework="pt") as f:
-            saved_key = f"fc_{_in}in_{_out}out"
-            try:
-                saved_tensor = f.get_tensor(saved_key)
-                self.lora_vit.head.weight = Parameter(saved_tensor)
-            except ValueError:
-                print("this fc weight is not for this model")
-
-    def save_lora_parameters(self, filename: str) -> None:
-        r"""Only safetensors is supported now.
-        pip install safetensor if you do not have one installed yet.        
-        save both lora and fc parameters.
-        """
-
-        assert filename.endswith(".safetensors")
-
-        num_layer = len(self.w_As)  # actually, it is half
-        a_tensors = {f"w_a_{i:03d}": self.w_As[i].weight for i in range(num_layer)}
-        b_tensors = {f"w_b_{i:03d}": self.w_Bs[i].weight for i in range(num_layer)}
-        
-        _in = self.lora_vit.head.in_features
-        _out = self.lora_vit.head.out_features
-        fc_tensors = {f"fc_{_in}in_{_out}out": self.lora_vit.head.weight}
-        
-        merged_dict = {**a_tensors, **b_tensors, **fc_tensors}
-        save_file(merged_dict, filename)
-
-    def load_lora_parameters(self, filename: str) -> None:
-        r"""Only safetensors is supported now.
-        pip install safetensor if you do not have one installed yet.\
-        load both lora and fc parameters.
-        """
-
-        assert filename.endswith(".safetensors")
-
-        with safe_open(filename, framework="pt") as f:
-            for i, w_A_linear in enumerate(self.w_As):
-                saved_key = f"w_a_{i:03d}"
-                saved_tensor = f.get_tensor(saved_key)
-                w_A_linear.weight = Parameter(saved_tensor)
-
-            for i, w_B_linear in enumerate(self.w_Bs):
-                saved_key = f"w_b_{i:03d}"
-                saved_tensor = f.get_tensor(saved_key)
-                w_B_linear.weight = Parameter(saved_tensor)
-                
-            _in = self.lora_vit.head.in_features
-            _out = self.lora_vit.head.out_features
-            saved_key = f"fc_{_in}in_{_out}out"
-            try:
-                saved_tensor = f.get_tensor(saved_key)
-                self.lora_vit.head.weight = Parameter(saved_tensor)
-            except ValueError:
-                print("this fc weight is not for this model")
 
     def reset_parameters(self) -> None:
         for w_A in self.w_As:
@@ -255,31 +153,98 @@ class LoRA_Sam(nn.Module):
             nn.init.zeros_(w_B.weight)
 
 
-class SAM_LoRA(nn.Module):
-    def __init__(self, num_embed=16):
-        super(SAM_LoRA, self).__init__()
-        self.sam = LoRA_Sam(r=4)
-        
-        self.Adapter = nn.Sequential(nn.Conv2d(256, 64, kernel_size=1, stride=1, padding=0, bias=False),
-                                     nn.BatchNorm2d(64), nn.ReLU(), nn.Conv2d(64, num_embed, kernel_size=1))
-                                     
-        self.logit_scale = torch.nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
-        #self.out_conv = nn.Conv2d(1, 1, 1)
-                                        
-        initialize_weights(self.Adapter)
-        #self.out_conv.weight.data.fill_(-4.4162)
-        #self.out_conv.bias.data.fill_(-1.3795)
+class SAM2_CD_LoRA(nn.Module):
+    """SAM2 Change Detection with LoRA.
+    
+    Args:
+        num_embed: Output embedding dimension
+        lora_r: LoRA rank
+        lora_layers: Which layers to apply LoRA (default: [8,9,10,11])
+        heterogeneous: Enable heterogeneous mode with two separate encoders
+    """
 
-    def run_pretrain(self, image):
-        image_embeddings = self.sam.get_image_embeddings(image)
-        return image_embeddings
+    def __init__(
+        self,
+        num_embed: int = 16,
+        lora_r: int = 4,
+        lora_layers: Optional[List[int]] = None,
+        heterogeneous: bool = False,
+    ):
+        super(SAM2_CD_LoRA, self).__init__()
+
+        self.heterogeneous = heterogeneous
+        self._patch_size = 16  # SAM2 uses patch size 16
+        in_channels = 256  # SAM2 feature dimension
+
+        if self.heterogeneous:
+            print("[sam2] Heterogeneous mode enabled: using two separate encoders")
+
+            # Encoder 1: smaller LoRA, fewer layers
+            lora_layers_1 = lora_layers if lora_layers is not None else [8, 9, 10, 11]
+            self.sam1 = LoRA_Sam2(r=lora_r, lora_layer=lora_layers_1)
+
+            # Encoder 2: larger LoRA, all layers
+            sam_model2 = build_sam2(
+                "configs/sam2.1/sam2.1_hiera_t.yaml",
+                os.path.join(working_path, "models", "sam2", "checkpoints", "sam2.1_hiera_tiny.pt"),
+            )
+            trunk2 = sam_model2.image_encoder.trunk
+            depth = len(trunk2.blocks)
+            lora_layers_2 = list(range(depth))
+            self.sam2 = LoRA_Sam2(r=lora_r * 8, sam_model=sam_model2, lora_layer=lora_layers_2)
+
+            # Two separate adapters
+            self.Adapter1 = nn.Sequential(
+                nn.Conv2d(in_channels, 64, kernel_size=1, stride=1, padding=0, bias=False),
+                nn.BatchNorm2d(64),
+                nn.ReLU(),
+                nn.Conv2d(64, num_embed, kernel_size=1),
+            )
+            self.Adapter2 = nn.Sequential(
+                nn.Conv2d(in_channels, 64, kernel_size=1, stride=1, padding=0, bias=False),
+                nn.BatchNorm2d(64),
+                nn.ReLU(),
+                nn.Conv2d(64, num_embed, kernel_size=1),
+            )
+            initialize_weights(self.Adapter1, self.Adapter2)
+        else:
+            lora_layers_default = lora_layers if lora_layers is not None else [8, 9, 10, 11]
+            self.sam = LoRA_Sam2(r=lora_r, lora_layer=lora_layers_default)
+
+            self.Adapter = nn.Sequential(
+                nn.Conv2d(in_channels, 64, kernel_size=1, stride=1, padding=0, bias=False),
+                nn.BatchNorm2d(64),
+                nn.ReLU(),
+                nn.Conv2d(64, num_embed, kernel_size=1),
+            )
+            initialize_weights(self.Adapter)
+
+        self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
+
+    def _pad_to_patch_size(self, x: torch.Tensor) -> torch.Tensor:
+        """Pad inputs to multiples of the patch size when necessary."""
+        ps = self._patch_size
+        if (x.shape[-2] % ps) or (x.shape[-1] % ps):
+            new_h = ps * (x.shape[-2] // ps + (1 if x.shape[-2] % ps else 0))
+            new_w = ps * (x.shape[-1] // ps + (1 if x.shape[-1] % ps else 0))
+            x = F.interpolate(x, [new_h, new_w], mode='bilinear', align_corners=False)
+        return x
+
+    def run_pretrain(self, image: Tensor, encoder_id: int = 1) -> Tensor:
+        if self.heterogeneous:
+            if encoder_id == 1:
+                return self.sam1.get_image_embeddings(image)
+            else:
+                return self.sam2.get_image_embeddings(image)
+        return self.sam.get_image_embeddings(image)
 
     def _make_layer(self, block, inplanes, planes, blocks, stride=1):
         downsample = None
         if stride != 1 or inplanes != planes:
             downsample = nn.Sequential(
                 conv1x1(inplanes, planes, stride),
-                nn.BatchNorm2d(planes) )
+                nn.BatchNorm2d(planes),
+            )
 
         layers = []
         layers.append(block(inplanes, planes, stride, downsample))
@@ -289,20 +254,51 @@ class SAM_LoRA(nn.Module):
 
         return nn.Sequential(*layers)
 
-    def forward(self, x: torch.Tensor):
-        feats = self.run_pretrain(x)        
-        y = self.Adapter(feats)        
+    def forward1(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward through encoder 1 (for heterogeneous mode)."""
+        x = self._pad_to_patch_size(x)
+        feats = self.sam1.get_image_embeddings(x)
+        y = self.Adapter1(feats)
         return y
 
-    def bi_forward(self, x1: torch.Tensor, x2: torch.Tensor):
+    def forward2(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward through encoder 2 (for heterogeneous mode)."""
+        x = self._pad_to_patch_size(x)
+        feats = self.sam2.get_image_embeddings(x)
+        y = self.Adapter2(feats)
+        return y
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Standard forward (single encoder mode)."""
+        x = self._pad_to_patch_size(x)
+        feats = self.run_pretrain(x)
+        y = self.Adapter(feats)
+        return y
+
+    def bi_forward(self, x1: torch.Tensor, x2: torch.Tensor) -> torch.Tensor:
+        """Bi-temporal forward for change detection.
+        
+        In heterogeneous mode: x1 goes through encoder1, x2 goes through encoder2.
+        In standard mode: both x1 and x2 go through the same encoder.
+        """
         input_shape = x1.shape[-2:]
-        y1 = self.forward(x1)
-        y2 = self.forward(x2)
-        
-        y1_norm = y1 / torch.norm(y1, dim=1, keepdim=True)
-        y2_norm = y2 / torch.norm(y2, dim=1, keepdim=True)
-        sim = torch.sum(y1_norm*y2_norm, dim=1, keepdim=True)                       
-        yc = -sim*self.logit_scale
-        #yc = self.out_conv(yc)
-        
-        return F.interpolate(yc, input_shape, mode="bilinear", align_corners=True)
+
+        if self.heterogeneous:
+            y1 = self.forward1(x1)
+            y2 = self.forward2(x2)
+        else:
+            y1 = self.forward(x1)
+            y2 = self.forward(x2)
+
+        y1_norm = y1 / (torch.norm(y1, dim=1, keepdim=True) + 1e-6)
+        y2_norm = y2 / (torch.norm(y2, dim=1, keepdim=True) + 1e-6)
+        sim = torch.sum(y1_norm * y2_norm, dim=1, keepdim=True)
+        yc = -sim * self.logit_scale
+
+        return F.interpolate(yc, input_shape, mode='bilinear', align_corners=False)
+
+
+# Backward-compatible aliases
+SAM_LoRA = SAM2_CD_LoRA
+SAM2_LoRA = SAM2_CD_LoRA
+SAM2_CD = SAM2_CD_LoRA

@@ -11,8 +11,7 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 
 from utils.misc import initialize_weights
-from segment_anything.modeling import Sam
-from segment_anything import sam_model_registry
+from models.Dino.backbones import DinoV2_self
 
 working_path = os.path.abspath('.')
 
@@ -59,7 +58,7 @@ class ResBlock(nn.Module):
 
 
 class _LoRA_qkv(nn.Module):
-    """LoRA wrapper for SAM qkv linear layer."""
+    """Inject LoRA into DINOv2 SelfAttention.qkv."""
 
     def __init__(
         self,
@@ -78,36 +77,33 @@ class _LoRA_qkv(nn.Module):
         self.dim = qkv.in_features
 
     def forward(self, x):
-        qkv = self.qkv(x)
+        qkv = self.qkv(x)  # B, N, 3*dim
         new_q = self.linear_b_q(self.linear_a_q(x))
         new_v = self.linear_b_v(self.linear_a_v(x))
-        qkv[:, :, :, :self.dim] += new_q
-        qkv[:, :, :, -self.dim:] += new_v
+        qkv[:, :, :self.dim] += new_q
+        qkv[:, :, -self.dim:] += new_v
         return qkv
 
 
-class LoRA_Sam(nn.Module):
-    """LoRA wrapper for SAM image encoder."""
-
-    def __init__(self, sam_model: Sam, r: int, lora_layer: Optional[List[int]] = None):
-        super(LoRA_Sam, self).__init__()
-
+class LoRA_Dino(nn.Module):
+    def __init__(self, dino_model, r: int, lora_layer: Optional[List[int]] = None):
+        super(LoRA_Dino, self).__init__()
         assert r > 0
 
         if lora_layer is not None:
             self.lora_layer = lora_layer
         else:
-            self.lora_layer = list(range(len(sam_model.image_encoder.blocks)))
+            self.lora_layer = list(range(len(dino_model.dino_model.blocks)))
 
         self.w_As = []
         self.w_Bs = []
 
         # Freeze backbone
-        for param in sam_model.image_encoder.parameters():
+        for param in dino_model.dino_model.parameters():
             param.requires_grad = False
 
         # LoRA surgery
-        for t_layer_i, blk in enumerate(sam_model.image_encoder.blocks):
+        for t_layer_i, blk in enumerate(dino_model.dino_model.blocks):
             if t_layer_i not in self.lora_layer:
                 continue
             w_qkv_linear = blk.attn.qkv
@@ -128,10 +124,10 @@ class LoRA_Sam(nn.Module):
                 w_b_linear_v,
             )
         self.reset_parameters()
-        self.sam = sam_model
+        self.dino = dino_model
 
     def get_image_embeddings(self, x: Tensor) -> Tensor:
-        return self.sam.image_encoder(x)
+        return self.dino(x)
 
     def reset_parameters(self) -> None:
         for w_A in self.w_As:
@@ -140,13 +136,12 @@ class LoRA_Sam(nn.Module):
             nn.init.zeros_(w_B.weight)
 
 
-class SAM_CD_LoRA(nn.Module):
-    """SAM Change Detection with LoRA.
+class Dinov2_CD_LoRA(nn.Module):
+    """DINOv2 Change Detection with LoRA.
     
     Args:
         num_embed: Output embedding dimension
-        model_type: SAM model type ('vit_b', 'vit_l', 'vit_h')
-        checkpoint: Path to SAM checkpoint
+        model_name: DINOv2 model variant ('dinov2_vitb14' or 'dinov2_vitl14')
         lora_r: LoRA rank
         lora_layers: Which layers to apply LoRA (default: [8,9,10,11])
         heterogeneous: Enable heterogeneous mode with two separate encoders
@@ -155,70 +150,75 @@ class SAM_CD_LoRA(nn.Module):
     def __init__(
         self,
         num_embed: int = 16,
-        model_type: str = 'vit_b',
-        checkpoint: str = None,
-        lora_r: int = 8,
+        model_name: str = 'dinov2_vitb14',
+        lora_r: int = 4,
         lora_layers: Optional[List[int]] = None,
         heterogeneous: bool = False,
     ):
-        super(SAM_CD_LoRA, self).__init__()
+        super(Dinov2_CD_LoRA, self).__init__()
 
         self.heterogeneous = heterogeneous
-        self._patch_size = 16  # SAM uses patch size 16
-        in_channels = 256  # SAM feature dimension
+        self._patch_size = 14  # DINOv2 uses patch size 14
 
-        # Default checkpoint path
-        if checkpoint is None:
-            checkpoint = os.path.join(working_path, "models", "sam_chkpt", "sam_vit_b_01ec64.pth")
+        # Determine channel count based on model
+        in_channels = 1024 if 'vitl' in model_name else 768
 
-        def _create_sam():
-            return sam_model_registry[model_type](checkpoint=checkpoint)
+        def _create_dino(model_name: str):
+            return DinoV2_self(
+                model_name=model_name,
+                layer1=11,
+                facet1="value",
+                use_cls=False,
+                norm_descs=True,
+                device="cuda",
+                pretrained=True,
+            )
 
         if self.heterogeneous:
-            print("[sam] Heterogeneous mode enabled: using two separate encoders")
-            sam1 = _create_sam()
-            sam2 = _create_sam()
+            print("[dinov2] Heterogeneous mode enabled: using two separate encoders")
+            dino1 = _create_dino(model_name)
+            dino2 = _create_dino(model_name)
 
             # Encoder 1: smaller LoRA, fewer layers
             lora_layers_1 = lora_layers if lora_layers is not None else [8, 9, 10, 11]
-            self.sam1 = LoRA_Sam(sam1, r=lora_r, lora_layer=lora_layers_1)
+            self.dino1 = LoRA_Dino(dino1, r=lora_r, lora_layer=lora_layers_1)
 
             # Encoder 2: larger LoRA, all layers
-            depth = len(sam2.image_encoder.blocks)
+            depth = len(dino2.dino_model.blocks)
             lora_layers_2 = list(range(depth))
-            self.sam2 = LoRA_Sam(sam2, r=lora_r * 4, lora_layer=lora_layers_2)
+            self.dino2 = LoRA_Dino(dino2, r=lora_r * 8, lora_layer=lora_layers_2)
 
             # Two separate adapters
             self.Adapter1 = nn.Sequential(
-                nn.Conv2d(in_channels, 64, kernel_size=1, stride=1, padding=0, bias=False),
-                nn.BatchNorm2d(64),
+                nn.Conv2d(in_channels, 128, kernel_size=1, stride=1, padding=0, bias=False),
+                nn.BatchNorm2d(128),
                 nn.ReLU(),
-                nn.Conv2d(64, num_embed, kernel_size=1),
+                nn.Conv2d(128, num_embed, kernel_size=1),
             )
             self.Adapter2 = nn.Sequential(
-                nn.Conv2d(in_channels, 64, kernel_size=1, stride=1, padding=0, bias=False),
-                nn.BatchNorm2d(64),
+                nn.Conv2d(in_channels, 128, kernel_size=1, stride=1, padding=0, bias=False),
+                nn.BatchNorm2d(128),
                 nn.ReLU(),
-                nn.Conv2d(64, num_embed, kernel_size=1),
+                nn.Conv2d(128, num_embed, kernel_size=1),
             )
             initialize_weights(self.Adapter1, self.Adapter2)
         else:
-            sam = _create_sam()
+            dino = _create_dino(model_name)
             lora_layers_default = lora_layers if lora_layers is not None else [8, 9, 10, 11]
-            self.sam = LoRA_Sam(sam, r=lora_r, lora_layer=lora_layers_default)
+            self.dino = LoRA_Dino(dino, r=lora_r, lora_layer=lora_layers_default)
 
             self.Adapter = nn.Sequential(
-                nn.Conv2d(in_channels, 64, kernel_size=1, stride=1, padding=0, bias=False),
-                nn.BatchNorm2d(64),
+                nn.Conv2d(in_channels, 128, kernel_size=1, stride=1, padding=0, bias=False),
+                nn.BatchNorm2d(128),
                 nn.ReLU(),
-                nn.Conv2d(64, num_embed, kernel_size=1),
+                nn.Conv2d(128, num_embed, kernel_size=1),
             )
             initialize_weights(self.Adapter)
 
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
 
     def _pad_to_patch_size(self, x: torch.Tensor) -> torch.Tensor:
-        """Pad inputs to multiples of the patch size when necessary."""
+        """Pad inputs to multiples of the patch size (14) when necessary."""
         ps = self._patch_size
         if (x.shape[-2] % ps) or (x.shape[-1] % ps):
             new_h = ps * (x.shape[-2] // ps + (1 if x.shape[-2] % ps else 0))
@@ -226,22 +226,13 @@ class SAM_CD_LoRA(nn.Module):
             x = F.interpolate(x, [new_h, new_w], mode='bilinear', align_corners=False)
         return x
 
-    def _prepare_input(self, x: torch.Tensor) -> torch.Tensor:
-        """Prepare input for SAM (requires 1024x1024 input)."""
-        x = self._pad_to_patch_size(x)
-        # SAM expects 1024x1024 input
-        if x.shape[-1] != 1024 or x.shape[-2] != 1024:
-            x = F.interpolate(x, [1024, 1024], mode='bilinear', align_corners=False)
-        return x
-
     def run_pretrain(self, image: Tensor, encoder_id: int = 1) -> Tensor:
-        image = self._prepare_input(image)
         if self.heterogeneous:
             if encoder_id == 1:
-                return self.sam1.get_image_embeddings(image)
+                return self.dino1.get_image_embeddings(image)
             else:
-                return self.sam2.get_image_embeddings(image)
-        return self.sam.get_image_embeddings(image)
+                return self.dino2.get_image_embeddings(image)
+        return self.dino.get_image_embeddings(image)
 
     def _make_layer(self, block, inplanes, planes, blocks, stride=1):
         downsample = None
@@ -261,21 +252,21 @@ class SAM_CD_LoRA(nn.Module):
 
     def forward1(self, x: torch.Tensor) -> torch.Tensor:
         """Forward through encoder 1 (for heterogeneous mode)."""
-        x = self._prepare_input(x)
-        feats = self.sam1.get_image_embeddings(x)
+        x = self._pad_to_patch_size(x)
+        feats = self.dino1.get_image_embeddings(x)
         y = self.Adapter1(feats)
         return y
 
     def forward2(self, x: torch.Tensor) -> torch.Tensor:
         """Forward through encoder 2 (for heterogeneous mode)."""
-        x = self._prepare_input(x)
-        feats = self.sam2.get_image_embeddings(x)
+        x = self._pad_to_patch_size(x)
+        feats = self.dino2.get_image_embeddings(x)
         y = self.Adapter2(feats)
         return y
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Standard forward (single encoder mode)."""
-        x = self._prepare_input(x)
+        x = self._pad_to_patch_size(x)
         feats = self.run_pretrain(x)
         y = self.Adapter(feats)
         return y
@@ -304,5 +295,5 @@ class SAM_CD_LoRA(nn.Module):
 
 
 # Backward-compatible aliases
-SAM_LoRA = SAM_CD_LoRA
-SAM_CD = SAM_CD_LoRA
+Dino_CD_LoRA = Dinov2_CD_LoRA
+Dinov2_CD = Dinov2_CD_LoRA

@@ -1,0 +1,60 @@
+experiment:
+  name: Dinov3_WHU_Het_LoRA
+  dataset: WHU_Het
+
+model:
+  module: models.Dinov3_LoRA
+  class_name: Dinov3_CD
+  args:
+    heterogeneous: true  # Enable heterogeneous mode for RGB+SAR inputs
+
+dataset:
+  module: datasets.WHU_Het
+  class_name: RS
+  root: /root/autodl-fs/Data/WHU_Het/
+  train:
+    split: train
+    kwargs:
+      random_crop: false
+      crop_nums: 6
+      crop_size: 512
+      epoch_sample_size: null  # Use all data
+  val:
+    split: val
+    kwargs:
+      sliding_crop: false
+  test:
+    split: test
+    kwargs:
+      sliding_crop: false
+
+training:
+  train_batch_size: 12
+  val_batch_size: 12
+  num_workers: 4
+  lr: 0.01
+  epochs: 20
+  gpu: true
+  dev_id: 0
+  multi_gpu: null
+  use_balanced_dp: false
+  print_freq: 10
+  predict_step: 5
+  triplet_weight: 1.0
+  infoNCE_weight: 1.0
+  sparse_weight: 1.0
+  sparse_thred: 0.2
+  loss_terms:
+    - triplet
+    - infoNCE
+    - sparse
+  tta: true
+  load_path: null
+  # Heterogeneous training settings
+  heterogeneous: true  # Flag for engine to use heterogeneous training logic
+
+paths:
+  checkpoints: checkpoints/WHU_Het
+  results: results/WHU_Het
+  logs: runs/WHU_Het
+

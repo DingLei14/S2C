@@ -6,6 +6,7 @@ from importlib import import_module
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
+import numpy as np
 from scipy import stats
 from skimage import io
 import torch
@@ -15,7 +16,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tensorboardX import SummaryWriter
 
-from utils.loss import InfoNCE, TripletLoss, loss_sparse
+from utils.loss import InfoNCE, TripletLoss, TripletLoss_HT, loss_sparse
 from utils.utils import AverageMeter, binary_accuracy as accuracy
 from utils.data_parallel import BalancedDataParallel
 
@@ -37,7 +38,9 @@ def run_training(cfg: Dict[str, Any]) -> None:
     model = _wrap_model(model, cfg['training'])
     model.to(device=device)
 
-    _sanity_check(model, device)
+    # Check if heterogeneous mode is enabled
+    heterogeneous = cfg['training'].get('heterogeneous', False) or cfg['model'].get('args', {}).get('heterogeneous', False)
+    _sanity_check(model, device, heterogeneous=heterogeneous)
 
     best_model = _train_loop(
         loaders,
@@ -138,14 +141,19 @@ def _wrap_model(model: nn.Module, train_cfg: Dict[str, Any]) -> nn.Module:
     return model
 
 
-def _sanity_check(model: nn.Module, device: torch.device) -> None:
+def _sanity_check(model: nn.Module, device: torch.device, heterogeneous: bool = False) -> None:
     model.eval()
     dsize = (1, 3, 512, 512)
     x1 = torch.randn(dsize, device=device)
     x2 = torch.randn(dsize, device=device)
     with torch.no_grad():
-        _call_model(model, '__call__', x1)
-        _call_model(model, '__call__', x2)
+        if heterogeneous:
+            # Heterogeneous mode: test separate forward paths
+            _call_model(model, 'forward1', x1)
+            _call_model(model, 'forward2', x2)
+        else:
+            _call_model(model, '__call__', x1)
+            _call_model(model, '__call__', x2)
         _bi_forward(model, x1, x2)
     _clear_cuda_cache(device)
 
@@ -153,6 +161,11 @@ def _sanity_check(model: nn.Module, device: torch.device) -> None:
 def _train_loop(loaders, net, cfg, writer, device, dataset_module):
     train_cfg = cfg['training']
     epochs = train_cfg['epochs']
+    
+    # Check if heterogeneous mode is enabled
+    heterogeneous = train_cfg.get('heterogeneous', False) or cfg['model'].get('args', {}).get('heterogeneous', False)
+    if heterogeneous:
+        print('[Engine] Heterogeneous training mode enabled')
 
     bestF = 0.0
     bestacc = 0.0
@@ -163,7 +176,11 @@ def _train_loop(loaders, net, cfg, writer, device, dataset_module):
     begin_time = time.time()
     all_iters = float(len(loaders['train']) * epochs)
 
-    loss_triplet = TripletLoss()
+    # Use appropriate triplet loss based on heterogeneous mode
+    if heterogeneous:
+        loss_triplet = TripletLoss_HT()
+    else:
+        loss_triplet = TripletLoss()
     loss_infoNCE = InfoNCE(embed_dim=16)
 
     params = list(filter(lambda p: p.requires_grad, net.parameters()))
@@ -198,14 +215,26 @@ def _train_loop(loaders, net, cfg, writer, device, dataset_module):
             imgs_B_aug = imgs_B_aug.to(device).float()
 
             optimizer.zero_grad()
-            y1 = net(imgs_A)
-            y2 = net(imgs_B)
-            y1_ = net(imgs_A_aug)
-            y2_ = net(imgs_B_aug)
+            
+            if heterogeneous:
+                # Heterogeneous mode: use separate encoders for each modality
+                y1 = _call_model(net, 'forward1', imgs_A)
+                y2 = _call_model(net, 'forward2', imgs_B)
+                y1_ = _call_model(net, 'forward1', imgs_A_aug)
+                # Triplet loss for heterogeneous: (anchor, positive, negative)
+                # anchor=A, positive=B (cross-modal pair), negative=A_aug (same modal but augmented)
+                loss_tri = loss_triplet(y1, y1_, y2) * train_cfg.get('triplet_weight', 1.0)
+                loss_cl = loss_infoNCE(y1, y2) * train_cfg['infoNCE_weight']
+            else:
+                # Standard mode: same encoder for both inputs
+                y1 = net(imgs_A)
+                y2 = net(imgs_B)
+                y1_ = net(imgs_A_aug)
+                y2_ = net(imgs_B_aug)
+                loss_tri = loss_triplet(y1, y1_, y2, y2_) * train_cfg.get('triplet_weight', 1.0)
+                loss_cl = (loss_infoNCE(y1, y2_) + loss_infoNCE(y1_, y2)) * train_cfg['infoNCE_weight']
+            
             yc = _bi_forward(net, imgs_A, imgs_B)
-
-            loss_tri = loss_triplet(y1, y1_, y2, y2_)
-            loss_cl = (loss_infoNCE(y1, y2_) + loss_infoNCE(y1_, y2)) * train_cfg['infoNCE_weight']
             loss_s = loss_sparse(yc, T=train_cfg['sparse_thred'], margin=0.0, ds_patch=16) * train_cfg['sparse_weight']
 
             loss = 0.0
@@ -275,17 +304,19 @@ def validate(val_loader, net, cfg, device, dataset_module, writer, curr_epoch=0,
         imgs_A, imgs_B, labels = data
         imgs_A = imgs_A.to(device).float()
         imgs_B = imgs_B.to(device).float()
+        # Labels from DataLoader should be tensor (B, H, W), add channel dim
         labels = labels.to(device).float().unsqueeze(1)
 
         with torch.no_grad():
             yc = _bi_forward(net, imgs_A, imgs_B)
-            yc = F.sigmoid(yc)
+            yc_sigmoid = F.sigmoid(yc)
             if TTA:
-                yc = _tta_aggregate(net, imgs_A, imgs_B, yc)
+                yc_sigmoid = _tta_aggregate(net, imgs_A, imgs_B, yc_sigmoid)
+            # Use raw logits for loss calculation (before sigmoid)
             loss = F.binary_cross_entropy_with_logits(yc, labels)
         val_loss.update(loss.detach().cpu().item())
 
-        preds = yc.detach().cpu().numpy()
+        preds = yc_sigmoid.detach().cpu().numpy()
         labels_np = labels.detach().cpu().numpy()
         for (pred, label) in zip(preds, labels_np):
             acc, precision, recall, F1, IoU = accuracy(pred, label)
@@ -322,6 +353,7 @@ def evaluate(test_loader, net, cfg, device, dataset_module, TTA=False):
         imgs_A, imgs_B, labels = data
         imgs_A = imgs_A.to(device).float()
         imgs_B = imgs_B.to(device).float()
+        # Labels from DataLoader should be tensor (B, H, W), add channel dim
         labels = labels.to(device).float().unsqueeze(1)
 
         with torch.no_grad():
@@ -360,12 +392,23 @@ def _tta_aggregate(net, imgs_A, imgs_B, base_pred):
 
 
 def calc_TP(pred, label):
+    """Calculate TP, TN, FP, FN for binary classification.
+    
+    Args:
+        pred: prediction array, shape (1, H, W) or (H, W), values in [0, 1]
+        label: ground truth array, shape (1, H, W) or (H, W), binary values
+    """
+    # Squeeze to 2D if needed
+    if pred.ndim == 3:
+        pred = pred.squeeze(0)
+    if label.ndim == 3:
+        label = label.squeeze(0)
+    
     pred = (pred >= 0.5)
     label = (label >= 0.5)
-    GT = (label).sum()
     TP = (pred * label).sum()
     FP = (pred * (~label)).sum()
-    FN = ((~pred) * (label)).sum()
+    FN = ((~pred) * label).sum()
     TN = ((~pred) * (~label)).sum()
     return TP, TN, FP, FN
 
